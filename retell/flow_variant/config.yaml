@@ -1,0 +1,155 @@
+# Retell agent + conversation-flow configuration for Sara (Reliable Appliance Repair).
+# Alternative build, not the submitted agent. Deployed by retell/flow_variant/deploy.py with flow.yaml and global_prompt.md.
+# ${VAR} values are filled from .env at deploy time.
+# Field names checked against the Retell API on 2026-10-25 (retell-sdk 6.2.12).
+
+flow:
+  model_config:
+    type: cascading
+    primary:
+      model: claude-4.5-haiku      # chosen 2026-10-25: Sonnet 5.5 spoke its tool-call reasoning aloud; Haiku 4.5 didn't and is faster
+    temperature: 0.3
+  start_speaker: agent
+  # global_prompt is loaded from global_prompt.md, nodes and start_node_id from flow.yaml (both in this folder).
+  # Function nodes in flow.yaml call these tools by tool_id. Ending the call is done by end nodes, so there is no end_call tool.
+  tools:
+    - type: custom
+      tool_id: tool_check_availability
+      name: check_availability
+      description: >-
+        Returns the open two-hour appointment windows on one date from the company schedule.
+        Each slot is the window's start time in ISO 8601 (Eastern time); a window lasts two hours.
+        An empty list means nothing is open that day. error "invalid_date" means the date was not sent as YYYY-MM-DD.
+      url: "https://${N8N_DOMAIN}/webhook/check-availability"
+      method: POST
+      parameters:
+        type: object
+        properties:
+          date:
+            type: string
+            description: The date to check, formatted YYYY-MM-DD, for example 2026-10-27.
+        required: [date]
+      timeout_ms: 10000
+      max_retry: 1
+
+    - type: custom
+      tool_id: tool_book_appointment
+      name: book_appointment
+      description: >-
+        Books a service visit in a window returned by check_availability and saves it to the company schedule.
+        Returns status "booked" with the booked slot_start and booking_id, or status "rejected" with a reason:
+        fee_not_accepted, brand_not_covered_for_warranty, slot_unavailable, or missing_field:<name>.
+      url: "https://${N8N_DOMAIN}/webhook/book-appointment"
+      method: POST
+      parameters:
+        type: object
+        properties:
+          customer_name:
+            type: string
+            description: The caller's full name.
+          phone:
+            type: string
+            description: Best callback number, digits only, for example 5551234567.
+          service_address:
+            type: string
+            description: Street address where the appliance is, written like "15 Birch Drive, Apt 27, New York", with the apartment number and city if given.
+          appliance_type:
+            type: string
+            description: The appliance, for example refrigerator, dishwasher, washer, dryer, oven.
+          brand:
+            type: string
+            description: The appliance brand as the caller said it, for example LG, Samsung, GE, Whirlpool.
+          issue_description:
+            type: string
+            description: Short description of the problem in the caller's words.
+          is_warranty:
+            type: boolean
+            description: True only if the caller said the appliance is under warranty and the brand is LG, Samsung or GE.
+          fee_accepted:
+            type: boolean
+            description: True only if the caller heard and agreed to the ninety-nine dollar service call fee. May be false for a covered warranty job.
+          slot_start:
+            type: string
+            description: The chosen window's start time, copied exactly from a check_availability slot.
+        required: [customer_name, phone, service_address, appliance_type, brand, issue_description, is_warranty, fee_accepted, slot_start]
+      timeout_ms: 15000
+      max_retry: 0   # a retry after a booking that actually succeeded would come back as slot_unavailable
+
+agent:
+  agent_name: Sara (Conversation Flow variant)
+  voice_id: 11labs-Grace          # ElevenLabs, female, American, middle-aged; final pick after a real call (CLAUDE.md §8b)
+  voice_model: eleven_v4_turbo
+  fallback_voice_ids: [cartesia-Hailey]   # different provider, as Retell requires
+  voice_speed: 0.95   # 1.0 sounded rushed on the first test call (Taron, 2026-10-25)
+  voice_temperature: 1.0
+  responsiveness: 0.8   # 1.0 jumped in as soon as the caller paused (Taron, 2026-10-25)
+  interruption_sensitivity: 1.0
+  enable_backchannel: true
+  backchannel_frequency: 0.8
+  # normalize_for_speech (CLAUDE.md §4) is no longer a Retell agent field as of 2026-10-24; the prompt writes numbers as spoken words instead.
+  denoising_mode: noise-cancellation
+  end_call_after_silence_ms: 120000
+  max_call_duration_ms: 900000
+  language: en-US
+  timezone: America/New_York
+  stt_mode: fast
+  boosted_keywords: [LG, Samsung, General Electric, GE, Whirlpool, Maytag, KitchenAid, Frigidaire, Bosch, Kenmore,
+                     refrigerator, dishwasher, washer, dryer, oven, range, microwave, American Home Shield,
+                     Monday, Tuesday, Wednesday, Thursday, Friday]   # weekdays added: "Friday" was heard as "first day"
+  webhook_url: "https://${N8N_DOMAIN}/webhook/retell-post-call"
+  webhook_events: [call_analyzed]
+  post_call_analysis_data:
+    - type: enum
+      name: call_type
+      description: >-
+        Who called. standard = customer wanting a repair, not a covered warranty job.
+        warranty = customer with an LG, Samsung or GE appliance under warranty.
+        warranty_company_rep = someone from a home warranty company handing off a job.
+        spam = sales call, robocall or anything unrelated to appliance repair. other = anything else.
+      choices: [standard, warranty, warranty_company_rep, spam, other]
+      required: true
+    - type: string
+      name: caller_name
+      description: The caller's name as they gave it. For a warranty company rep, the rep's name.
+    - type: string
+      name: callback_number
+      description: The phone number the caller gave for callbacks, after any corrections. Empty if none was given.
+    - type: string
+      name: service_address
+      description: The service address the customer gave, after any corrections.
+    - type: string
+      name: appliance_type
+      description: The appliance needing repair, for example refrigerator or dryer.
+    - type: string
+      name: brand
+      description: The appliance brand.
+    - type: string
+      name: issue_description
+      description: One short sentence describing the problem.
+    - type: boolean
+      name: is_warranty
+      description: True if this was handled as a warranty job (covered brand, no service call fee).
+    - type: boolean
+      name: fee_accepted
+      description: True if the caller agreed to the ninety-nine dollar service call fee.
+    - type: enum
+      name: booking_status
+      description: >-
+        booked = book_appointment returned booked. declined_fee = caller would not accept the fee.
+        not_booked = a customer call that ended without a booking for another reason.
+        not_applicable = warranty company rep, spam or other calls.
+      choices: [booked, declined_fee, not_booked, not_applicable]
+      required: true
+    - type: string
+      name: booking_time
+      description: The booked day and two-hour window as confirmed by book_appointment, for example "Tuesday Oct 27, 2 to 4 PM". Empty if not booked.
+    - type: string
+      name: rep_company
+      description: For a warranty company rep, the company they called from. Empty otherwise.
+    - type: string
+      name: rep_job_description
+      description: For a warranty company rep, the job they handed off, including any customer name, address or claim number. Empty otherwise.
+    - type: string
+      name: summary
+      description: One sentence summarizing the call for the office team.
+      required: true

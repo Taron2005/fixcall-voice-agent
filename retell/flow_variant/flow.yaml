@@ -1,0 +1,258 @@
+# Sara's conversation flow (Retell Conversation Flow), the alternative build. Deployed by retell/flow_variant/deploy.py.
+# The global prompt (global_prompt.md) applies to every node; each node adds only its own short instruction.
+# Why a flow: in the single-prompt version every model asked LG/Samsung/GE callers about warranty, because the
+# warranty rule was visible during intake. Here intake and fee never mention warranty; the global `warranty` node
+# takes over only when the caller raises it (CLAUDE.md §2).
+
+start_node_id: greeting
+
+nodes:
+  - id: greeting
+    type: conversation
+    name: Greeting
+    instruction:
+      type: static_text
+      text: "Hi, this is Reliable Appliance Repair. How can I help you?"
+    edges:
+      - id: greeting_to_spam
+        transition_condition: {type: prompt, prompt: "The call is a sales pitch, a robocall, or about something other than home appliance repair, such as pool pumps, air conditioning, heating or plumbing"}
+        destination_node_id: spam_end
+      - id: greeting_to_intake
+        transition_condition: {type: prompt, prompt: "The caller has an appliance that needs repair"}
+        destination_node_id: intake
+    else_edge:
+      id: greeting_else
+      transition_condition: {type: prompt, prompt: "Else"}
+      destination_node_id: intake
+
+  - id: intake
+    type: conversation
+    name: Intake
+    skippable: true
+    instruction:
+      type: prompt
+      text: >-
+        Collect what the technician needs, one question at a time, asking only for what's still missing:
+        the appliance, what's wrong with it, and its brand; the caller's name; the best phone number
+        (if the caller's number shows in the facts, you can offer to use it); and the service address,
+        meaning house number and street, plus apartment number and city if there are any.
+    edges:
+      - id: intake_done
+        transition_condition: {type: prompt, prompt: "The caller has given the appliance, the problem, the brand, their name, a phone number and the service address"}
+        destination_node_id: fee
+      - id: intake_unrelated
+        transition_condition: {type: prompt, prompt: "The caller wants something other than home appliance repair, such as pool pumps, air conditioning, heating or plumbing, or the call is a sales pitch"}
+        destination_node_id: spam_end
+
+  - id: fee
+    type: conversation
+    name: Service call fee
+    skippable: true
+    instruction:
+      type: prompt
+      text: >-
+        Tell the caller there's a ninety-nine dollar service call fee for the visit and ask if that's okay.
+        The visit can only be booked after a clear yes, because the fee is charged for the visit.
+    edges:
+      - id: fee_accepted
+        transition_condition: {type: prompt, prompt: "The caller agreed to the ninety-nine dollar service call fee"}
+        destination_node_id: ask_day
+      - id: fee_declined
+        transition_condition: {type: prompt, prompt: "The caller declined the fee or doesn't want to book"}
+        destination_node_id: decline_end
+
+  - id: ask_day
+    type: conversation
+    name: Ask for a day
+    instruction:
+      type: prompt
+      text: >-
+        Ask which day works for the visit. Visits are Monday to Friday, eight to six; if they ask for a weekend
+        or another time, say so and ask for a weekday.
+    edges:
+      - id: day_given
+        transition_condition: {type: prompt, prompt: "The caller named a weekday or a date for the visit"}
+        destination_node_id: check_availability
+
+  - id: check_availability
+    type: function
+    name: Check availability
+    tool_id: tool_check_availability
+    tool_type: local
+    wait_for_result: true
+    speak_during_execution: true
+    instruction: {type: static_text, text: "Let me take a look."}
+    else_edge:
+      id: availability_done
+      transition_condition: {type: prompt, prompt: "Else"}
+      destination_node_id: offer_windows
+
+  - id: offer_windows
+    type: conversation
+    name: Offer windows
+    instruction:
+      type: prompt
+      text: >-
+        Use the latest check_availability result. Offer two or three of the returned windows in plain words,
+        like "ten to noon or two to four," and ask which works. Only returned windows are real openings.
+        If nothing is open, say that day is full and ask about another day. If the result says invalid_date,
+        ask which day they'd like once more.
+    edges:
+      - id: window_picked
+        transition_condition: {type: prompt, prompt: "The caller picked one of the offered windows"}
+        destination_node_id: readback
+      - id: other_day
+        transition_condition: {type: prompt, prompt: "The caller wants or named a different day"}
+        destination_node_id: check_availability
+
+  - id: readback
+    type: conversation
+    name: Read back details
+    instruction:
+      type: prompt
+      text: >-
+        Read back the caller's name, phone number and service address in one sentence and ask if that's all correct.
+        If they correct something, use the correction and check just that part again.
+    edges:
+      - id: details_confirmed
+        transition_condition: {type: prompt, prompt: "The caller confirmed the details are correct"}
+        destination_node_id: book
+
+  - id: book
+    type: function
+    name: Book appointment
+    tool_id: tool_book_appointment
+    tool_type: local
+    wait_for_result: true
+    speak_during_execution: true
+    instruction: {type: static_text, text: "Okay, one sec while I book that."}
+    edges:
+      - id: booked
+        transition_condition: {type: prompt, prompt: "book_appointment returned status booked"}
+        destination_node_id: booked_confirm
+      - id: slot_taken
+        transition_condition: {type: prompt, prompt: "book_appointment was rejected with reason slot_unavailable"}
+        destination_node_id: slot_taken
+    else_edge:
+      id: booking_rejected
+      transition_condition: {type: prompt, prompt: "Else"}
+      destination_node_id: fix_rejection
+
+  - id: booked_confirm
+    type: conversation
+    name: Booking confirmed
+    instruction:
+      type: prompt
+      text: >-
+        Tell the caller they're all set, with the day and two-hour window from the booking result, and that
+        a technician will come to the service address during that window. Then ask if there's anything else.
+    edges:
+      - id: nothing_else
+        transition_condition: {type: prompt, prompt: "The caller has nothing else"}
+        destination_node_id: goodbye_end
+
+  - id: slot_taken
+    type: conversation
+    name: Slot just taken
+    instruction:
+      type: prompt
+      text: Tell the caller that window was just taken and ask which day they'd like instead.
+    edges:
+      - id: new_day
+        transition_condition: {type: prompt, prompt: "The caller named a day"}
+        destination_node_id: check_availability
+
+  - id: fix_rejection
+    type: conversation
+    name: Fix booking rejection
+    instruction:
+      type: prompt
+      text: >-
+        The booking was rejected; fix the reason it gave. missing_field means ask the caller for that detail.
+        fee_not_accepted means tell them about the ninety-nine dollar service call fee and ask if it's okay.
+        brand_not_covered_for_warranty means explain that warranty work is only for LG, Samsung and GE, so this
+        would be a regular visit with the ninety-nine dollar service call fee, and ask if that's okay.
+    edges:
+      - id: fixed
+        transition_condition: {type: prompt, prompt: "The caller gave the missing detail or agreed to go ahead"}
+        destination_node_id: book
+      - id: gave_up
+        transition_condition: {type: prompt, prompt: "The caller doesn't want to go ahead"}
+        destination_node_id: decline_end
+
+  - id: warranty
+    type: conversation
+    name: Warranty (only when the caller raises it)
+    global_node_setting:
+      condition: "The caller says their appliance is under warranty"
+      cool_down: 4
+    instruction:
+      type: prompt
+      text: >-
+        The caller says their appliance is under warranty. The company does warranty work only for LG, Samsung and
+        General Electric (GE), with no service call fee; that's all you can say about what a warranty job costs.
+        If you don't know the brand yet, ask for it. If it's LG, Samsung or GE, tell them it's covered, so there's
+        no service call fee, and continue. For any other brand, explain that warranty work is only for those three
+        brands, so this would be a regular visit with the ninety-nine dollar service call fee, and ask if they'd
+        like to go ahead.
+    edges:
+      - id: warranty_covered
+        transition_condition: {type: prompt, prompt: "The brand is LG, Samsung or GE (General Electric), so it's a covered warranty job"}
+        destination_node_id: warranty_intake
+      - id: warranty_not_covered_go_ahead
+        transition_condition: {type: prompt, prompt: "The brand isn't covered and the caller wants a regular visit with the fee"}
+        destination_node_id: intake
+      - id: warranty_not_covered_no
+        transition_condition: {type: prompt, prompt: "The brand isn't covered and the caller doesn't want a regular visit"}
+        destination_node_id: decline_end
+
+  - id: warranty_intake
+    type: conversation
+    name: Intake (covered warranty, no fee)
+    skippable: true
+    instruction:
+      type: prompt
+      text: >-
+        Collect what the technician needs, one question at a time, asking only for what's still missing:
+        the appliance and what's wrong with it; the caller's name; the best phone number (if the caller's number
+        shows in the facts, you can offer to use it); and the service address, meaning house number and street,
+        plus apartment number and city if there are any.
+    edges:
+      - id: warranty_intake_done
+        transition_condition: {type: prompt, prompt: "The caller has given the appliance, the problem, their name, a phone number and the service address"}
+        destination_node_id: ask_day
+
+  - id: rep_message
+    type: conversation
+    name: Warranty company rep (take a message)
+    global_node_setting:
+      condition: "The caller says they're calling from a home warranty company, such as American Home Shield, to hand off or dispatch a job"
+    instruction:
+      type: prompt
+      text: >-
+        This is a home warranty company handing off a job, so take a message for the team instead of booking.
+        Get their name, their company, a callback number, and the job details, including the appliance, the problem
+        and any homeowner name, address or claim number they give, one question at a time. Read the callback number
+        back once, then tell them the team will call them back.
+    edges:
+      - id: rep_done
+        transition_condition: {type: prompt, prompt: "You told the caller the team will call them back and they have nothing else"}
+        destination_node_id: goodbye_end
+
+  - id: spam_end
+    type: end
+    name: Decline unrelated call
+    speak_during_execution: true
+    instruction: {type: static_text, text: "Sorry, I can't help you with that."}
+
+  - id: decline_end
+    type: end
+    name: Polite close
+    speak_during_execution: true
+    instruction: {type: prompt, text: "Thank the caller, say they're welcome to call back anytime, and say goodbye in one short sentence."}
+
+  - id: goodbye_end
+    type: end
+    name: Goodbye
+    speak_during_execution: true
+    instruction: {type: prompt, text: "Thank the caller, by name if you know it, and say goodbye in one short sentence."}

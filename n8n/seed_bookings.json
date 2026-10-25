@@ -1,0 +1,78 @@
+{
+  "name": "Seed bookings table",
+  "nodes": [
+    {
+      "id": "f4e0bc74-30ec-48d7-8a13-2925b07651c3",
+      "name": "Run Seed Once",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {}
+    },
+    {
+      "id": "bdc8e46a-28dd-48d5-aaac-7f662aa40d71",
+      "name": "Delete Previous Seed Rows",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [480, 300],
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": { "__rl": true, "mode": "name", "value": "bookings" },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            { "keyName": "booking_id", "condition": "like", "keyValue": "SEED-%" }
+          ]
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "67a50a48-a37d-4cdc-9b32-1110907a58f3",
+      "name": "Generate Fake Bookings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Fills ~50% of the 2-hour windows (Mon-Fri, 08-18 America/New_York)\n// for the next 14 calendar days, starting tomorrow. Deterministic per run date.\nconst ZONE = 'America/New_York';\nconst WINDOW_STARTS = [8, 10, 12, 14, 16];\nconst DAYS_AHEAD = 14;\nconst FILL_RATIO = 0.5;\n\nlet seed = Number(DateTime.now().setZone(ZONE).toFormat('yyyyLLdd'));\nfunction rand() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }\nfunction pick(list) { return list[Math.floor(rand() * list.length)]; }\n\nconst firstNames = ['James', 'Maria', 'Robert', 'Linda', 'Michael', 'Patricia', 'David', 'Jennifer', 'Daniel', 'Susan', 'Kevin', 'Angela', 'Brian', 'Nicole', 'Steven', 'Karen'];\nconst lastNames = ['Johnson', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Wilson', 'Anderson', 'Thomas', 'Moore', 'Martin', 'Clark', 'Lewis', 'Walker', 'Hall'];\nconst streets = ['Maple Ave', 'Oak St', 'Pine Rd', 'Cedar Ln', 'Elm St', 'Birch Dr', 'Willow Way', 'Lakeview Blvd', 'Hillcrest Rd', 'Park Pl'];\nconst jobs = [\n  ['refrigerator', 'not cooling, freezer still works'],\n  ['refrigerator', 'leaking water under the unit'],\n  ['dishwasher', 'not draining, water left at the bottom'],\n  ['dishwasher', 'dishes come out dirty'],\n  ['washer', 'will not spin'],\n  ['washer', 'shaking loudly during spin cycle'],\n  ['dryer', 'runs but does not heat'],\n  ['dryer', 'drum not turning'],\n  ['oven', 'not heating to set temperature'],\n  ['range', 'one burner will not light'],\n  ['microwave', 'turns on but does not heat']\n];\nconst warrantyBrands = ['LG', 'Samsung', 'GE'];\nconst paidBrands = ['Whirlpool', 'Maytag', 'KitchenAid', 'Frigidaire', 'Bosch', 'Kenmore', 'LG', 'Samsung', 'GE'];\n\nconst rows = [];\nconst now = DateTime.now().setZone(ZONE);\nlet counter = 1;\nfor (let d = 1; d <= DAYS_AHEAD; d++) {\n  const day = now.plus({ days: d }).startOf('day');\n  if (day.weekday > 5) continue;\n  for (const hour of WINDOW_STARTS) {\n    if (rand() >= FILL_RATIO) continue;\n    const isWarranty = rand() < 0.3;\n    const brand = isWarranty ? pick(warrantyBrands) : pick(paidBrands);\n    const job = pick(jobs);\n    const name = pick(firstNames) + ' ' + pick(lastNames);\n    const slotStart = day.set({ hour, minute: 0, second: 0, millisecond: 0 }).toISO({ suppressMilliseconds: true });\n    rows.push({\n      slot_start: slotStart,\n      booking_id: 'SEED-' + String(counter++).padStart(3, '0'),\n      title: (isWarranty ? 'Warranty' : 'Paid') + ' repair: ' + job[0] + ' (' + brand + ') — ' + name,\n      customer_name: name,\n      phone: '555-01' + String(Math.floor(rand() * 100)).padStart(2, '0'),\n      service_address: (100 + Math.floor(rand() * 900)) + ' ' + pick(streets),\n      appliance_type: job[0],\n      brand: brand,\n      issue_description: job[1],\n      is_warranty: isWarranty,\n      fee_accepted: !isWarranty,\n      fee: isWarranty ? 'warranty: no fee' : '$99',\n      created_at: now.toISO()\n    });\n  }\n}\nreturn rows.map(r => ({ json: r }));"
+      }
+    },
+    {
+      "id": "d963c69e-1980-4aae-815f-7ce650d2f493",
+      "name": "Insert Into Bookings",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [960, 300],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": { "__rl": true, "mode": "name", "value": "bookings" },
+        "columns": { "mappingMode": "autoMapInputData", "value": null },
+        "options": { "optimizeBulk": true }
+      }
+    },
+    {
+      "id": "75c03641-ee00-4a9e-8d5d-e38b2e48456f",
+      "name": "Sticky Note 51adeb93",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [448, 208],
+      "parameters": {
+        "content": "## Seed bookings (one-off)\nDeletes rows whose booking_id starts with SEED-, then fills ~50% of the next 2 weeks of 2-hour windows (Mon–Fri 8–18, US Eastern) with fake jobs. Real bookings are never touched. Safe to re-run.",
+        "color": 4,
+        "width": 640,
+        "height": 224
+      }
+    }
+  ],
+  "connections": {
+    "Run Seed Once": { "main": [[{ "node": "Delete Previous Seed Rows", "type": "main", "index": 0 }]] },
+    "Delete Previous Seed Rows": { "main": [[{ "node": "Generate Fake Bookings", "type": "main", "index": 0 }]] },
+    "Generate Fake Bookings": { "main": [[{ "node": "Insert Into Bookings", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

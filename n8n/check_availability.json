@@ -1,0 +1,170 @@
+{
+  "name": "check_availability",
+  "nodes": [
+    {
+      "id": "85473ed6-104a-4d25-b1f3-b75f24588899",
+      "name": "Retell check_availability",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "check-availability",
+        "responseMode": "responseNode"
+      },
+      "webhookId": "e8f57b72-4175-40d1-8351-e0a7d4670b50"
+    },
+    {
+      "id": "2d260023-5815-4030-9e24-dfef6064aa3f",
+      "name": "Read Requested Date",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "date",
+              "name": "date",
+              "value": "={{ String($json.body?.args?.date ?? $json.body?.date ?? \"\").trim() }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "c2fd4e9f-ad8d-4c20-a2bb-e2f1a25652b3",
+      "name": "Get Bookings On Date",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "slot_start",
+              "condition": "like",
+              "keyValue": "={{ $json.date }}T%"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "116b500e-5dc4-4b03-b645-0c98ece7fd3f",
+      "name": "Compute Free Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Business rules (CLAUDE.md §8): America/New_York, Mon-Fri, 2-hour windows 08-18.\nconst ZONE = 'America/New_York';\nconst WINDOW_STARTS = [8, 10, 12, 14, 16];\n\nconst date = $('Read Requested Date').first().json.date;\nconst day = DateTime.fromISO(date, { zone: ZONE });\n// An unreadable date is the agent's formatting mistake, not a fully booked day, so say so.\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || !day.isValid) {\n  return [{ json: { date, slots: [], error: 'invalid_date' } }];\n}\nif (day.weekday > 5) {\n  return [{ json: { date, slots: [] } }];\n}\n\nconst taken = new Set($input.all().map(i => i.json.slot_start).filter(Boolean));\nconst now = DateTime.now().setZone(ZONE);\nconst slots = WINDOW_STARTS\n  .map(h => day.set({ hour: h, minute: 0, second: 0, millisecond: 0 }))\n  .filter(start => start > now)\n  .map(start => start.toISO({ suppressMilliseconds: true }))\n  .filter(iso => !taken.has(iso));\n\nreturn [{ json: { date, slots } }];"
+      }
+    },
+    {
+      "id": "51b8b65e-abb7-4dfa-8eeb-bd4f41f91411",
+      "name": "Return Slots To Retell",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "respondWith": "firstIncomingItem"
+      }
+    },
+    {
+      "id": "d4e96430-f382-4095-835f-b9cb0d239233",
+      "name": "Sticky Note 22518ad2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        448,
+        208
+      ],
+      "parameters": {
+        "content": "## check_availability (Retell tool)\nInput: args.date (YYYY-MM-DD). Output: { date, slots: [ISO start of each free 2-hour window] }. Weekends and windows already started return no slots. An unreadable date returns error: invalid_date.",
+        "color": 4,
+        "width": 880,
+        "height": 224
+      }
+    }
+  ],
+  "connections": {
+    "Retell check_availability": {
+      "main": [
+        [
+          {
+            "node": "Read Requested Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Requested Date": {
+      "main": [
+        [
+          {
+            "node": "Get Bookings On Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Bookings On Date": {
+      "main": [
+        [
+          {
+            "node": "Compute Free Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Free Slots": {
+      "main": [
+        [
+          {
+            "node": "Return Slots To Retell",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

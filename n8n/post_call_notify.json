@@ -1,0 +1,213 @@
+{
+  "name": "post_call_notify",
+  "nodes": [
+    {
+      "id": "1116d768-d0c2-4325-ae05-f4181ed9d811",
+      "name": "Retell post-call webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "retell-post-call",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "d927072b-932d-43f2-95d6-f16655eedc15"
+    },
+    {
+      "id": "a1c0d6f2-3b7e-4c55-9e0e-2f6d8b1a7c44",
+      "name": "Ack Retell (204)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 204
+        }
+      }
+    },
+    {
+      "id": "44a390d1-f091-4788-8bb8-914af6e8ee51",
+      "name": "Verify Retell Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Same check as book_appointment: x-retell-signature = \"v=<ms timestamp>,d=<hex>\",\n// hex = HMAC-SHA256(raw_body + timestamp) keyed with the webhook-badge Retell API key (n8n Variable RETELL_API_KEY).\nconst crypto = require('crypto');\nconst MAX_AGE_MS = 5 * 60 * 1000;\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst header = String(headers['x-retell-signature'] ?? '');\nconst key = $vars.RETELL_API_KEY ?? '';\n\nlet raw = '';\nif (item.binary?.data) {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n}\nlet body = item.json.body;\nif ((!body || Object.keys(body).length === 0) && raw) {\n  try { body = JSON.parse(raw); } catch (e) { body = {}; }\n}\n\nlet ok = false;\nconst match = /^v=(\\d+),d=([0-9a-f]+)$/i.exec(header);\nif (key && raw && match && Math.abs(Date.now() - Number(match[1])) <= MAX_AGE_MS) {\n  const expected = crypto.createHmac('sha256', key).update(raw + match[1]).digest('hex');\n  const a = Buffer.from(expected, 'hex');\n  const b = Buffer.from(match[2], 'hex');\n  ok = a.length === b.length && crypto.timingSafeEqual(a, b);\n}\n\nreturn [{ json: { signature_ok: ok, event: body?.event ?? '', call: body?.call ?? {} } }];"
+      }
+    },
+    {
+      "id": "044557d6-128c-465a-b288-ae5a06b67ff3",
+      "name": "Signed call_analyzed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.signature_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{ $json.event }}",
+              "rightValue": "call_analyzed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "f8218b56-b1a5-4ebd-a22f-7a57ff2fd5cf",
+      "name": "Build Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// One message per call (CLAUDE.md §5.3). Retell retries webhooks, so each call_id is sent once.\nconst ZONE = 'America/New_York';\nconst call = $input.first().json.call ?? {};\nconst callId = String(call.call_id ?? '');\n\nconst memory = $getWorkflowStaticData('global');\nmemory.sentCallIds = memory.sentCallIds ?? [];\nif (callId && memory.sentCallIds.includes(callId)) return [];\nif (callId) memory.sentCallIds = [...memory.sentCallIds, callId].slice(-500);\n\nconst d = call.call_analysis?.custom_analysis_data ?? {};\nconst esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst val = x => (x === undefined || x === null || String(x).trim() === '') ? '—' : esc(String(x).trim());\nconst yes = x => x === true || String(x).toLowerCase() === 'true';\n\nconst type = String(d.call_type ?? 'other').toLowerCase();\nconst titles = {\n  standard: '🛠 <b>Standard repair call</b>',\n  warranty: '🛡 <b>Warranty repair call</b>',\n  warranty_company_rep: '🏢 <b>Warranty company rep</b>',\n  spam: '🚫 <b>Spam / irrelevant</b>',\n  other: '📞 <b>Other call</b>'\n};\nconst startedAt = call.start_timestamp\n  ? DateTime.fromMillis(Number(call.start_timestamp)).setZone(ZONE).toFormat('ccc LLL d, h:mm a') + ' ET'\n  : '—';\nconst durationMs = call.duration_ms ?? (call.end_timestamp && call.start_timestamp ? call.end_timestamp - call.start_timestamp : null);\nconst duration = durationMs != null ? Math.floor(durationMs / 60000) + 'm ' + Math.round((durationMs % 60000) / 1000) + 's' : '—';\nconst summary = d.summary ?? call.call_analysis?.call_summary;\n\nconst lines = [titles[type] ?? titles.other, startedAt + ' · ' + duration + ' · from ' + val(call.from_number), ''];\n\nif (type === 'standard' || type === 'warranty') {\n  const warranty = type === 'warranty' || yes(d.is_warranty);\n  const fee = warranty ? 'Warranty, no fee' : (yes(d.fee_accepted) ? '$99 accepted' : '$99 not accepted');\n  const status = String(d.booking_status ?? '').toLowerCase();\n  const booking = status === 'booked' ? '✅ Booked: ' + val(d.booking_time)\n    : status === 'declined_fee' ? '❌ Not booked: caller declined the $99 fee'\n    : '❌ Not booked';\n  lines.push(\n    'Name: ' + val(d.caller_name),\n    'Phone: ' + val(d.callback_number || call.from_number),\n    'Address: ' + val(d.service_address),\n    'Appliance: ' + val(d.appliance_type),\n    'Brand: ' + val(d.brand),\n    'Issue: ' + val(d.issue_description),\n    'Fee: ' + fee,\n    booking\n  );\n} else if (type === 'warranty_company_rep') {\n  lines.push(\n    'Rep: ' + val(d.caller_name),\n    'Company: ' + val(d.rep_company),\n    'Callback: ' + val(d.callback_number || call.from_number),\n    'Job: ' + val(d.rep_job_description),\n    '📞 Callback promised'\n  );\n} else {\n  lines.push('Caller: ' + val(call.from_number));\n}\nlines.push('', 'Summary: ' + val(summary));\n\nreturn [{ json: { text: lines.join('\\n') } }];"
+      }
+    },
+    {
+      "id": "6b274443-b179-464a-bed6-921f40c709f8",
+      "name": "Send To Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
+      },
+      "webhookId": "8161ca54-1e19-4c87-9d13-0a141479dca6",
+      "credentials": {
+        "telegramApi": {
+          "id": "vQWqjMftzYCVJlxV",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "id": "7cd49025-0f79-4992-a3dd-d33f9b97baf1",
+      "name": "Sticky Note caf9bd33",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        688,
+        112
+      ],
+      "parameters": {
+        "content": "## post_call_notify\nRetell sends call_analyzed here after every call. Ack replies 204 at once (Retell wants an answer within 10 s), then the signature is checked, other events and repeated call_ids are skipped, and one Telegram message goes to $vars.TELEGRAM_CHAT_ID.",
+        "color": 4,
+        "width": 880,
+        "height": 320
+      }
+    }
+  ],
+  "connections": {
+    "Retell post-call webhook": {
+      "main": [
+        [
+          {
+            "node": "Ack Retell (204)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Retell Signature": {
+      "main": [
+        [
+          {
+            "node": "Signed call_analyzed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signed call_analyzed?": {
+      "main": [
+        [
+          {
+            "node": "Build Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Send To Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack Retell (204)": {
+      "main": [
+        [
+          {
+            "node": "Verify Retell Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

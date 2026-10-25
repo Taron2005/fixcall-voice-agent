@@ -1,0 +1,418 @@
+{
+  "name": "book_appointment",
+  "nodes": [
+    {
+      "id": "d712bae8-6060-432d-9cea-7998c34f3db4",
+      "name": "Retell book_appointment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "book-appointment",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "a02f9965-226c-4091-8cb4-846e0c1bbe88"
+    },
+    {
+      "id": "beb85441-8021-49e6-aa5e-cb0d34345217",
+      "name": "Validate Booking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Hard rules from CLAUDE.md §5.2, checked in order. Business hours from §8.\nconst ZONE = 'America/New_York';\nconst WINDOW_STARTS = [8, 10, 12, 14, 16];\nconst WARRANTY_BRANDS = ['lg', 'samsung', 'ge', 'general electric'];\nconst REQUIRED = ['customer_name', 'phone', 'service_address', 'appliance_type', 'brand', 'issue_description', 'is_warranty', 'slot_start'];\n\nconst body = $input.first().json.body ?? {};\nconst a = body.args ?? body;\nconst text = v => (v === undefined || v === null) ? '' : String(v).trim();\nconst bool = v => v === true || text(v).toLowerCase() === 'true';\nconst reject = reason => [{ json: { valid: false, reason } }];\n\n// \"Use the number I'm calling from\": if the agent sent no usable number, use the caller ID Retell\n// attached to the request; with no caller ID either, the phone counts as missing.\nif (text(a.phone).replace(/\\D/g, '').length < 7) a.phone = body.call?.from_number ?? '';\n\nfor (const field of REQUIRED) {\n  if (text(a[field]) === '') return reject('missing_field:' + field);\n}\n\nconst isWarranty = bool(a.is_warranty);\nconst feeAccepted = bool(a.fee_accepted);\nconst brandKey = text(a.brand).toLowerCase().replace(/[^a-z ]/g, '').replace(/\\s+/g, ' ').trim();\nif (isWarranty && !WARRANTY_BRANDS.includes(brandKey)) return reject('brand_not_covered_for_warranty');\nif (!isWarranty && !feeAccepted) return reject('fee_not_accepted');\n\n// The slot must be a real future window; a taken slot is checked against the table next.\nconst start = DateTime.fromISO(text(a.slot_start), { zone: ZONE });\nconst isWindow = start.isValid && start.weekday <= 5 && WINDOW_STARTS.includes(start.hour)\n  && start.minute === 0 && start.second === 0 && start > DateTime.now().setZone(ZONE);\nif (!isWindow) return reject('slot_unavailable');\n\nconst customerName = text(a.customer_name);\nconst applianceType = text(a.appliance_type);\nconst brand = text(a.brand);\nreturn [{ json: { valid: true, booking: {\n  slot_start: start.toISO({ suppressMilliseconds: true }),\n  booking_id: 'BK-' + DateTime.now().setZone(ZONE).toFormat('yyMMdd') + '-' + Math.random().toString(36).slice(2, 6).toUpperCase(),\n  title: (isWarranty ? 'Warranty' : 'Paid') + ' repair: ' + applianceType + ' (' + brand + ') — ' + customerName,\n  customer_name: customerName,\n  phone: text(a.phone),\n  service_address: text(a.service_address),\n  appliance_type: applianceType,\n  brand: brand,\n  issue_description: text(a.issue_description),\n  is_warranty: isWarranty,\n  fee_accepted: feeAccepted,\n  fee: isWarranty ? 'warranty: no fee' : '$99',\n  created_at: DateTime.now().toISO()\n} } }];"
+      }
+    },
+    {
+      "id": "6e116714-cb50-43a1-844f-8c3c5249c37e",
+      "name": "Rules Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "4cf88529-bde3-43c8-ab1f-4d7a16635c17",
+      "name": "Find Booking In Slot",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1440,
+        200
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "slot_start",
+              "condition": "eq",
+              "keyValue": "={{ $json.booking.slot_start }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "830d070b-3904-496d-9fc4-6fc57bc75730",
+      "name": "Slot Still Free?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ String($json.id ?? \"\") }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "ae0768e2-7db5-4838-bb72-e51dae5158c8",
+      "name": "Prepare Booking Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "return [{ json: $('Validate Booking').first().json.booking }];"
+      }
+    },
+    {
+      "id": "50587ebb-fe55-4e2b-b679-8f60edb632c6",
+      "name": "Insert Booking",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        100
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "bookings"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        }
+      }
+    },
+    {
+      "id": "3a02c019-ac7f-4ee2-9e3f-6d84e2fa6a4c",
+      "name": "Respond Booked",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2400,
+        100
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"booked\", slot_start: $(\"Validate Booking\").first().json.booking.slot_start, booking_id: $(\"Validate Booking\").first().json.booking.booking_id }) }}"
+      }
+    },
+    {
+      "id": "a86bf71c-d6ca-4f25-99d9-deaed2dea286",
+      "name": "Respond Slot Taken",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"rejected\", \"reason\": \"slot_unavailable\" }"
+      }
+    },
+    {
+      "id": "27a6647b-faff-4625-8b39-94742b3b9e77",
+      "name": "Respond Rule Rejected",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1440,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"rejected\", reason: $json.reason }) }}"
+      }
+    },
+    {
+      "id": "9e32132c-5246-4fc5-90ce-380de52ea9ff",
+      "name": "Sticky Note dc5bcf83",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        928,
+        208
+      ],
+      "parameters": {
+        "content": "## book_appointment (Retell tool)\nFirst checks x-retell-signature (key: n8n Variable RETELL_API_KEY); unsigned requests get 401 unauthorized. Then rejects in this order: missing_field:<name>, brand_not_covered_for_warranty (warranty only for LG / Samsung / GE), fee_not_accepted (paid jobs need the $99 fee agreed), slot_unavailable (not a future Mon–Fri 2-hour window, or already booked). Otherwise inserts the row and returns booked.",
+        "color": 4,
+        "width": 640,
+        "height": 352
+      }
+    },
+    {
+      "id": "6655da35-fa51-48e3-862d-38eb42b4c4d7",
+      "name": "Verify Retell Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Retell signs each request: x-retell-signature = \"v=<ms timestamp>,d=<hex>\",\n// hex = HMAC-SHA256(raw_body + timestamp) keyed with the Retell API key that has the webhook badge.\n// The key lives in the n8n Variable RETELL_API_KEY so it never appears in the workflow export.\nconst crypto = require('crypto');\nconst MAX_AGE_MS = 5 * 60 * 1000;\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst header = String(headers['x-retell-signature'] ?? '');\nconst key = $vars.RETELL_API_KEY ?? '';\n\nlet raw = '';\nif (item.binary?.data) {\n  raw = (await this.helpers.getBinaryDataBuffer(0, 'data')).toString('utf8');\n}\nlet body = item.json.body;\nif ((!body || Object.keys(body).length === 0) && raw) {\n  try { body = JSON.parse(raw); } catch (e) { body = {}; }\n}\n\nlet ok = false;\nconst match = /^v=(\\d+),d=([0-9a-f]+)$/i.exec(header);\nif (key && raw && match && Math.abs(Date.now() - Number(match[1])) <= MAX_AGE_MS) {\n  const expected = crypto.createHmac('sha256', key).update(raw + match[1]).digest('hex');\n  const a = Buffer.from(expected, 'hex');\n  const b = Buffer.from(match[2], 'hex');\n  ok = a.length === b.length && crypto.timingSafeEqual(a, b);\n}\n\nreturn [{ json: { signature_ok: ok, body } }];"
+      }
+    },
+    {
+      "id": "dbb45b6c-fb1b-4c9c-8bec-5612ab619b6a",
+      "name": "Signed By Retell?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.signature_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "77074c95-08af-4fbb-ac20-fc0c32d9097a",
+      "name": "Respond Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        960,
+        560
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"rejected\", \"reason\": \"unauthorized\" }",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Retell book_appointment": {
+      "main": [
+        [
+          {
+            "node": "Verify Retell Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Booking": {
+      "main": [
+        [
+          {
+            "node": "Rules Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rules Passed?": {
+      "main": [
+        [
+          {
+            "node": "Find Booking In Slot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Rule Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Booking In Slot": {
+      "main": [
+        [
+          {
+            "node": "Slot Still Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot Still Free?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Booking Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Slot Taken",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Booking Row": {
+      "main": [
+        [
+          {
+            "node": "Insert Booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Booking": {
+      "main": [
+        [
+          {
+            "node": "Respond Booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Retell Signature": {
+      "main": [
+        [
+          {
+            "node": "Signed By Retell?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signed By Retell?": {
+      "main": [
+        [
+          {
+            "node": "Validate Booking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
